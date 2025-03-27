@@ -1,123 +1,248 @@
 # matching_engine.py
-# Order matching engine with FIFO price-time priority.
-# FIXED: Properly executes trades when orders overlap and broadcasts every trade,
-# and now logs explicit trade details. Also uses the same Order ID for partially filled orders.
+# Order matching engine with FIFO price-time priority, multi-level matching,
+# and enhanced DPR/TER logic including mirror random slippage.
 
 import logging
-from collections import deque
 import threading
-from utils import enforce_tick
+import time
+import random
 import network
+from utils import enforce_tick
+import config
 
 class MatchingEngine:
     def __init__(self, order_book):
         self.order_book = order_book
         self.log = logging.getLogger("exchange")
-        self.lock = threading.Lock()  # Ensure thread-safe order processing
+        self.trade_logger = logging.getLogger("trade")
+        self.last_traded_price = config.INITIAL_PRICE  # Track last traded price (LTP)
+        self.lock = threading.Lock()
+        # Daily band setup (DPR - Daily Price Range):
+        self.daily_open_price = config.INITIAL_PRICE
+        self.current_band_percent = config.MAX_DAILY_MOVE_PERCENT
+        self.daily_lower_bound = self.daily_open_price * (1 - self.current_band_percent / 100)
+        self.daily_upper_bound = self.daily_open_price * (1 + self.current_band_percent / 100)
+        
+        # Circuit breaker initialization
+        self.circuit_active = False
+        self.circuit_trigger_time = None
 
-    def process_order(self, side, price, quantity, owner=None):
+    def reset_for_new_day(self, new_open_price):
+        """Reset daily parameters at the start of a new day."""
+        with self.lock:
+            self.daily_open_price = new_open_price
+            self.current_band_percent = config.MAX_DAILY_MOVE_PERCENT
+            self.daily_lower_bound = self.daily_open_price * (1 - self.current_band_percent / 100)
+            self.daily_upper_bound = self.daily_open_price * (1 + self.current_band_percent / 100)
+            # Reset circuit breaker at the start of a new day
+            self.circuit_active = False
+            self.circuit_trigger_time = None
+            self.log.info(f"New day started. Open price={new_open_price:.2f}, Band=±{self.current_band_percent}% "
+                          f"({self.daily_lower_bound:.2f} - {self.daily_upper_bound:.2f})")
+
+    def expand_daily_band(self):
+        """Expand the daily band by a fixed increment."""
+        self.current_band_percent += config.BAND_EXPANSION_INCREMENT
+        self.daily_lower_bound = self.daily_open_price * (1 - self.current_band_percent / 100)
+        self.daily_upper_bound = self.daily_open_price * (1 + self.current_band_percent / 100)
+        self.log.info(f"Daily band expanded to ±{self.current_band_percent}%. New bounds: "
+                      f"[{self.daily_lower_bound:.2f}, {self.daily_upper_bound:.2f}]")
+        
+
+    def get_market_trend(self):
         """
-        Process an incoming order by matching it against the opposite side.
-        Executes trades until fully filled or unmatched volume remains.
-        Each trade is broadcast via UDP and now logged with details.
-        Returns the remaining order (if not fully matched) or None if fully filled.
+        Determine the current market trend based on the daily open and the last traded price.
+        Returns 'bullish', 'bearish', or 'sideways'.
         """
+        threshold = 0.005 * self.daily_open_price  # 0.5% threshold
+        if self.last_traded_price > self.daily_open_price + threshold:
+            return "bullish"
+        elif self.last_traded_price < self.daily_open_price - threshold:
+            return "bearish"
+        else:
+            return "sideways"
+
+
+    def process_order(self, side, limit_price, quantity, owner=None):
         from order_book import Order
-        # Create the incoming order (order ID is set inside Order)
-        incoming_order = Order(side, price, quantity, owner)
-        # incoming_order.price=enforce_tick(incoming_order.price)
-        network.send_order(incoming_order)  # Broadcast the new order.
+        incoming_order = Order(side, limit_price, quantity, owner)
+        
+        # Check if circuit breaker is active
+        if self.circuit_active:
+            if time.perf_counter() - self.circuit_trigger_time < config.CIRCUIT_BREAKER_DURATION:
+                self.log.info("Circuit breaker active. Order rejected.")
+                network.send_rejection(incoming_order)
+                return None
+            else:
+                # Reset circuit breaker if the halt duration has expired
+                self.circuit_active = False
+                self.circuit_trigger_time = None
+
+        network.send_order(incoming_order)
         remaining_qty = quantity
+
+        # Clamp the incoming order's limit to the DPR bounds.
+        if limit_price < self.daily_lower_bound:
+            limit_price = self.daily_lower_bound
+        elif limit_price > self.daily_upper_bound:
+            limit_price = self.daily_upper_bound
+        incoming_order.price = enforce_tick(limit_price)
+
+        # Enforce TER (Trade Execution Range)
+        ter_lower_bound = self.daily_open_price * (1 - config.TER_PERCENT / 100)
+        ter_upper_bound = self.daily_open_price * (1 + config.TER_PERCENT / 100)
+        if limit_price < ter_lower_bound or limit_price > ter_upper_bound:
+            self.log.info(
+                f"Order price {limit_price:.2f} outside TER range ({ter_lower_bound:.2f}-{ter_upper_bound:.2f}). Order rejected."
+            )
+            network.send_rejection(incoming_order)
+            return None
+
+        aggregated_qty = 0
+        execution_count = 0
 
         with self.lock:
             if side == 'B':
-                # Buy order: try to match with the lowest sell prices.
+                # Process BUY order: walk through ask levels (lowest ask first)
                 while remaining_qty > 0:
-                    best_ask_price, _ = self.order_book.get_best_ask()
-                    if best_ask_price is None or best_ask_price > price:
-                        break  # No matching sell orders available.
+                    best_ask_price, total_ask_qty = self.order_book.get_best_ask()
+                    if best_ask_price is None or best_ask_price > limit_price:
+                        break
 
                     sell_queue = self.order_book.asks[best_ask_price]
-                    best_sell = sell_queue[0]  # FIFO: first order at that price.
-                    trade_qty = min(remaining_qty, best_sell.quantity)
-                    trade_price = enforce_tick(best_ask_price)
+                    while remaining_qty > 0 and sell_queue:
+                        best_sell = sell_queue[0]  # FIFO order at this price level
+                        trade_qty = min(remaining_qty, best_sell.quantity)
+                        # Set initial trade price from best ask price.
+                        trade_price = best_ask_price
+                        # Apply mirror random slippage:
+                        if incoming_order.owner is not None:
+                            slippage_percent = config.CLIENT_SLIPPAGE_PERCENT
+                        else:
+                            slippage_percent = config.BOT_SLIPPAGE_PERCENT
+                        slippage = random.uniform(0, slippage_percent/100 * trade_price)
+                        trade_price = enforce_tick(trade_price + slippage)
 
-                    # Execute trade
-                    best_sell.quantity -= trade_qty
-                    remaining_qty -= trade_qty
+                        best_sell.quantity -= trade_qty
+                        remaining_qty -= trade_qty
+                        aggregated_qty += trade_qty
+                        execution_count += 1
 
-                    # Broadcast the trade via UDP.
-                    network.send_trade(buy_id=incoming_order.id, sell_id=best_sell.id,
-                                       trade_price=trade_price, trade_qty=trade_qty)
+                        network.send_trade(
+                            buy_id=incoming_order.id,
+                            sell_id=best_sell.id,
+                            trade_price=trade_price,
+                            trade_qty=trade_qty
+                        )
+                        self._send_trade_confirmation(incoming_order, best_sell, trade_qty, trade_price)
+                        self.trade_logger.info(
+                            f"T: Trade executed: Buyer Order id {incoming_order.id} and Seller Order id {best_sell.id} "
+                            f"for {trade_qty} units at Rs {trade_price:.2f}. LTP={self.last_traded_price:.2f}"
+                        )
+                        self.last_traded_price = trade_price
 
-                    # Send TCP confirmation if the buyer/seller is a client.
-                    self._send_trade_confirmation(incoming_order, best_sell, trade_qty, trade_price)
+                        if trade_price <= self.daily_lower_bound or trade_price >= self.daily_upper_bound:
+                            if not self.circuit_active:
+                                self.log.info(
+                                    "Circuit breaker triggered: Trade executed at circuit limit. Halting trading temporarily."
+                                )
+                                self.circuit_active = True
+                                self.circuit_trigger_time = time.perf_counter()
 
-                    # Log the trade details explicitly.
-                    self.log.info(f"Trade executed: Buy Order {incoming_order.id} and Sell Order {best_sell.id} "
-                                  f"for {trade_qty} units at {trade_price:.2f}")
+                        if best_sell.quantity == 0:
+                            self.order_book.remove_order(best_sell.id)
+                        else:
+                            break
+                    # End inner loop.
+                # End while loop.
 
-                    # Remove fully filled sell order.
-                    if best_sell.quantity == 0:
-                        self.order_book.remove_order(best_sell.id)
+                if execution_count > 1 and aggregated_qty > 0:
+                    self.trade_logger.info(
+                        f"T: Aggregated Trade: Incoming BUY order id {incoming_order.id} executed "
+                        f"{execution_count} times for total {aggregated_qty} units."
+                    )
 
-                # If there's unmatched quantity, add the remaining portion to the order book.
                 if remaining_qty > 0:
                     incoming_order.quantity = remaining_qty
-                    # Use add_existing_order to preserve the same order id.
                     self.order_book.add_existing_order(incoming_order)
                     return incoming_order
                 else:
-                    return None  # Order fully matched.
+                    return None
 
             else:
-                # Sell order: try to match with the highest buy prices.
+                # Process SELL order: walk through bid levels (highest bid first)
                 while remaining_qty > 0:
-                    best_bid_price, _ = self.order_book.get_best_bid()
-                    if best_bid_price is None or best_bid_price < price:
-                        break  # No matching buy orders available.
+                    best_bid_price, total_bid_qty = self.order_book.get_best_bid()
+                    if best_bid_price is None or best_bid_price < limit_price:
+                        break
 
                     buy_queue = self.order_book.bids[best_bid_price]
-                    best_buy = buy_queue[0]  # FIFO: first order at that price.
-                    trade_qty = min(remaining_qty, best_buy.quantity)
-                    trade_price = enforce_tick(best_bid_price)
+                    while remaining_qty > 0 and buy_queue:
+                        best_buy = buy_queue[0]
+                        trade_qty = min(remaining_qty, best_buy.quantity)
+                        trade_price = best_bid_price
+                        # Apply mirror random slippage for sell orders:
+                        if incoming_order.owner is not None:
+                            slippage_percent = config.CLIENT_SLIPPAGE_PERCENT
+                        else:
+                            slippage_percent = config.BOT_SLIPPAGE_PERCENT
+                        slippage = random.uniform(0, slippage_percent/100 * trade_price)
+                        trade_price = enforce_tick(trade_price - slippage)
 
-                    # Execute trade
-                    best_buy.quantity -= trade_qty
-                    remaining_qty -= trade_qty
+                        best_buy.quantity -= trade_qty
+                        remaining_qty -= trade_qty
+                        aggregated_qty += trade_qty
+                        execution_count += 1
 
-                    network.send_trade(buy_id=best_buy.id, sell_id=incoming_order.id,
-                                       trade_price=trade_price, trade_qty=trade_qty)
+                        network.send_trade(
+                            buy_id=best_buy.id,
+                            sell_id=incoming_order.id,
+                            trade_price=trade_price,
+                            trade_qty=trade_qty
+                        )
+                        self._send_trade_confirmation(best_buy, incoming_order, trade_qty, trade_price)
+                        self.trade_logger.info(
+                            f"T: Trade executed: Seller Order id {incoming_order.id} and Buyer Order id {best_buy.id} "
+                            f"for {trade_qty} units at Rs {trade_price:.2f}. LTP={self.last_traded_price:.2f}"
+                        )
+                        self.last_traded_price = trade_price
 
-                    self._send_trade_confirmation(best_buy, incoming_order, trade_qty, trade_price)
+                        if trade_price <= self.daily_lower_bound or trade_price >= self.daily_upper_bound:
+                            if not self.circuit_active:
+                                self.log.info(
+                                    "Circuit breaker triggered: Trade executed at circuit limit. Halting trading temporarily."
+                                )
+                                self.circuit_active = True
+                                self.circuit_trigger_time = time.perf_counter()
 
-                    self.log.info(f"Trade executed: Sell Order {incoming_order.id} and Buy Order {best_buy.id} "
-                                  f"for {trade_qty} units at {trade_price:.2f}")
+                        if best_buy.quantity == 0:
+                            self.order_book.remove_order(best_buy.id)
+                        else:
+                            break
+                    # End inner loop.
+                # End while loop.
 
-                    if best_buy.quantity == 0:
-                        self.order_book.remove_order(best_buy.id)
+                if execution_count > 1 and aggregated_qty > 0:
+                    self.trade_logger.info(
+                        f"T: Aggregated Trade: Incoming SELL order id {incoming_order.id} executed "
+                        f"{execution_count} times for total {aggregated_qty} units."
+                    )
 
                 if remaining_qty > 0:
                     incoming_order.quantity = remaining_qty
                     self.order_book.add_existing_order(incoming_order)
                     return incoming_order
                 else:
-                    return None  # Order fully matched.
+                    return None
 
     def _send_trade_confirmation(self, buy_order, sell_order, quantity, price):
-        """Send TCP trade confirmation to clients if applicable."""
         if buy_order.owner is not None:
             try:
-                buy_order.owner.sendall(
-                    f"TRADE CONFIRM: Bought {quantity} @ {price}\n".encode()
-                )
+                buy_order.owner.sendall(f"TRADE CONFIRM: Bought {quantity} @ {price:.2f}\n".encode())
             except Exception as e:
                 self.log.error(f"Error sending trade confirmation to buyer: {e}")
-
         if sell_order.owner is not None:
             try:
-                sell_order.owner.sendall(
-                    f"TRADE CONFIRM: Sold {quantity} @ {price}\n".encode()
-                )
+                sell_order.owner.sendall(f"TRADE CONFIRM: Sold {quantity} @ {price:.2f}\n".encode())
             except Exception as e:
                 self.log.error(f"Error sending trade confirmation to seller: {e}")

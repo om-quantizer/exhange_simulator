@@ -25,7 +25,7 @@ class MarketData:
         self.price = enforce_tick(new_price)
 
         # Log the tick with high-resolution time if needed.
-        self.log.info(f"MarketData Tick: Price = {self.price:.2f}")
+        # self.log.info(f"MarketData Tick: Price = {self.price:.2f}")
         return self.price
 
     def run(self, duration=60):

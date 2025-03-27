@@ -1,9 +1,13 @@
 # order_book.py
-# In-memory order book with FIFO Price-Time priority matching and edit/cancel support.
+# In-memory order book with FIFO Price-Time priority matching, edit/cancel support, 
+# and snapshot logging of bids/asks for visualization.
+
 from collections import deque
 import network
-from utils import get_next_order_id, current_timestamp_ns, enforce_tick 
+from utils import get_next_order_id, current_timestamp_ns, enforce_tick
 import config
+import logging
+import datetime
 
 class Order:
     """Represents an order in the order book."""
@@ -18,7 +22,8 @@ class Order:
         self.active = True             # True if order is live.
 
     def __repr__(self):
-        return f"Order(id={self.id}, side={self.side}, price={self.price:.2f}, qty={self.quantity}, active={self.active})"
+        return (f"Order(id={self.id}, side={self.side}, price={self.price:.2f}, "
+                f"qty={self.quantity}, active={self.active})")
 
 class OrderBook:
     """Holds buy and sell orders grouped by price level."""
@@ -26,6 +31,8 @@ class OrderBook:
         self.bids = {}            # price -> deque of buy orders.
         self.asks = {}            # price -> deque of sell orders.
         self.orders_by_id = {}    # Lookup table for orders.
+        # A dedicated logger for snapshots:
+        self.lob_logger = logging.getLogger("orderbook")
 
     def add_order(self, side, price, quantity, owner=None):
         """Create and add a new order, broadcasting a New Order message."""
@@ -36,14 +43,15 @@ class OrderBook:
 
     def _add_to_book(self, order):
         """Internal: add an order to the appropriate book and lookup."""
+        price_key = enforce_tick(order.price)
         if order.side == 'B':
-            if order.price not in self.bids:
-                self.bids[enforce_tick(order.price)] = deque()
-            self.bids[enforce_tick(order.price)].append(order)
+            if price_key not in self.bids:
+                self.bids[price_key] = deque()
+            self.bids[price_key].append(order)
         else:
-            if order.price not in self.asks:
-                self.asks[order.price] = deque()
-            self.asks[order.price].append(order)
+            if price_key not in self.asks:
+                self.asks[price_key] = deque()
+            self.asks[price_key].append(order)
         self.orders_by_id[order.id] = order
 
     def add_existing_order(self, order):
@@ -59,18 +67,19 @@ class OrderBook:
         order = self.orders_by_id.pop(order_id, None)
         if not order:
             return None
+        price_key = enforce_tick(order.price)
         if order.side == 'B':
-            dq = self.bids.get(order.price)
+            dq = self.bids.get(price_key)
             if dq:
                 self._remove_from_deque(dq, order_id)
                 if not dq:
-                    self.bids.pop(order.price, None)
+                    self.bids.pop(price_key, None)
         else:
-            dq = self.asks.get(order.price)
+            dq = self.asks.get(price_key)
             if dq:
                 self._remove_from_deque(dq, order_id)
                 if not dq:
-                    self.asks.pop(order.price, None)
+                    self.asks.pop(price_key, None)
         return order
 
     def _remove_from_deque(self, dq, order_id):
@@ -103,7 +112,7 @@ class OrderBook:
         self.remove_order(order_id)
         # Update the order attributes.
         if new_price is not None:
-            order.price = new_price
+            order.price = enforce_tick(new_price)
         if new_quantity is not None:
             order.quantity = new_quantity
         order.timestamp_ns = current_timestamp_ns()  # Update time for re-prioritization.
@@ -122,7 +131,9 @@ class OrderBook:
         if not self.bids:
             return None, 0
         best_price = max(self.bids.keys())
-        total_qty = sum(o.quantity for o in self.bids[best_price])
+        # Take a snapshot copy of the orders at this price level
+        orders_at_best = list(self.bids[best_price])
+        total_qty = sum(o.quantity for o in orders_at_best if o is not None and hasattr(o, "quantity"))
         return best_price, total_qty
 
     def get_best_ask(self):
@@ -130,6 +141,75 @@ class OrderBook:
         if not self.asks:
             return None, 0
         best_price = min(self.asks.keys())
-        total_qty = sum(o.quantity for o in self.asks[best_price])
+        # Take a snapshot of the current orders at this price level.
+        orders_at_best = list(self.asks[best_price])
+        total_qty = sum(o.quantity for o in orders_at_best if o is not None and hasattr(o, "quantity"))
         return best_price, total_qty
 
+    def get_market_price(self):
+        """
+        Compute the market price using order book imbalance for better accuracy.
+        If both bid and ask exist:
+            - Uses mid-price adjusted by liquidity imbalance.
+        If only one side exists:
+            - Returns that side’s price.
+        If neither exists, return INITIAL_PRICE from config.
+        """
+        best_bid, bid_qty = self.get_best_bid()
+        best_ask, ask_qty = self.get_best_ask()
+
+        if best_bid is not None and best_ask is not None:
+            mid_price = (best_bid + best_ask) / 2
+            total_qty = bid_qty + ask_qty
+            if total_qty > 0:
+                weighted_price = (bid_qty * best_bid + ask_qty * best_ask) / total_qty
+            else:
+                weighted_price = mid_price
+            smoothed_price = (mid_price + weighted_price) / 2
+            return enforce_tick(smoothed_price)
+
+        return best_bid if best_bid is not None else best_ask if best_ask is not None else config.INITIAL_PRICE
+
+    def log_snapshot(self, depth=10):
+        """
+        Log the current order book state (bids and asks) up to a certain depth.
+        This writes lines to the 'orderbook' logger (order_book.log).
+        Format: SNAPSHOT,<timestamp>,SIDE,price,volume
+        """
+        import datetime
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        
+        # Bids: descending order by price
+        sorted_bids = sorted(self.bids.keys(), reverse=True)
+        bid_count = 0
+        for price_level in sorted_bids:
+            if bid_count >= depth:
+                break
+            # Take a snapshot copy of the deque to avoid concurrent modification issues.
+            orders_at_price = list(self.bids[price_level])
+            total_vol = sum(o.quantity for o in orders_at_price 
+                            if o is not None and hasattr(o, "quantity"))
+            self.lob_logger.info(f"SNAPSHOT,{timestamp_str},BID,{price_level:.2f},{total_vol}")
+            bid_count += 1
+
+        # Asks: ascending order by price
+        sorted_asks = sorted(self.asks.keys())
+        ask_count = 0
+        for price_level in sorted_asks:
+            if ask_count >= depth:
+                break
+            orders_at_price = list(self.asks[price_level])
+            total_vol = sum(o.quantity for o in orders_at_price 
+                            if o is not None and hasattr(o, "quantity"))
+            self.lob_logger.info(f"SNAPSHOT,{timestamp_str},ASK,{price_level:.2f},{total_vol}")
+            ask_count += 1
+
+
+    # NEW method: log best bid/ask at the moment
+    def log_best_prices(self):
+        best_bid, bid_qty = self.get_best_bid()
+        best_ask, ask_qty = self.get_best_ask()
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        self.lob_logger.info(
+            f"BEST_PRICES,{timestamp_str},BID={best_bid},QTY={bid_qty},ASK={best_ask},QTY={ask_qty}"
+        )
