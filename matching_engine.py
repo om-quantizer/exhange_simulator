@@ -1,60 +1,53 @@
 # matching_engine.py
-# Order matching engine with FIFO price-time priority, multi-level matching,
-# and enhanced DPR/TER logic including mirror random slippage.
-
 import logging
 import threading
 import time
 import random
 import network
-from utils import enforce_tick
+from utils import enforce_tick, trigger_circuit_breaker, reset_circuit_breaker
 import config
+from collections import deque
+import math
 
 class MatchingEngine:
     def __init__(self, order_book):
         self.order_book = order_book
         self.log = logging.getLogger("exchange")
         self.trade_logger = logging.getLogger("trade")
-        self.last_traded_price = config.INITIAL_PRICE  # Track last traded price (LTP)
+        self.last_traded_price = config.INITIAL_PRICE
         self.lock = threading.Lock()
-        # Daily band setup (DPR - Daily Price Range):
         self.daily_open_price = config.INITIAL_PRICE
         self.current_band_percent = config.MAX_DAILY_MOVE_PERCENT
         self.daily_lower_bound = self.daily_open_price * (1 - self.current_band_percent / 100)
         self.daily_upper_bound = self.daily_open_price * (1 + self.current_band_percent / 100)
-        
-        # Circuit breaker initialization
         self.circuit_active = False
         self.circuit_trigger_time = None
 
+        # Price history for trend indicators
+        self.price_history = deque(maxlen=200)
+
     def reset_for_new_day(self, new_open_price):
-        """Reset daily parameters at the start of a new day."""
         with self.lock:
             self.daily_open_price = new_open_price
             self.current_band_percent = config.MAX_DAILY_MOVE_PERCENT
             self.daily_lower_bound = self.daily_open_price * (1 - self.current_band_percent / 100)
             self.daily_upper_bound = self.daily_open_price * (1 + self.current_band_percent / 100)
-            # Reset circuit breaker at the start of a new day
             self.circuit_active = False
             self.circuit_trigger_time = None
+            self.price_history.clear()
+            self.price_history.append(new_open_price)
             self.log.info(f"New day started. Open price={new_open_price:.2f}, Band=±{self.current_band_percent}% "
                           f"({self.daily_lower_bound:.2f} - {self.daily_upper_bound:.2f})")
 
     def expand_daily_band(self):
-        """Expand the daily band by a fixed increment."""
         self.current_band_percent += config.BAND_EXPANSION_INCREMENT
         self.daily_lower_bound = self.daily_open_price * (1 - self.current_band_percent / 100)
         self.daily_upper_bound = self.daily_open_price * (1 + self.current_band_percent / 100)
         self.log.info(f"Daily band expanded to ±{self.current_band_percent}%. New bounds: "
                       f"[{self.daily_lower_bound:.2f}, {self.daily_upper_bound:.2f}]")
         
-
     def get_market_trend(self):
-        """
-        Determine the current market trend based on the daily open and the last traded price.
-        Returns 'bullish', 'bearish', or 'sideways'.
-        """
-        threshold = 0.005 * self.daily_open_price  # 0.5% threshold
+        threshold = 0.005 * self.daily_open_price
         if self.last_traded_price > self.daily_open_price + threshold:
             return "bullish"
         elif self.last_traded_price < self.daily_open_price - threshold:
@@ -62,33 +55,43 @@ class MatchingEngine:
         else:
             return "sideways"
 
+    def update_trend_indicator(self, price):
+        self.price_history.append(price)
+        short_window = list(self.price_history)[-20:]
+        long_window = list(self.price_history)[-100:] if len(self.price_history) >= 100 else list(self.price_history)
+        short_ma = sum(short_window) / len(short_window)
+        long_ma = sum(long_window) / len(long_window)
+        if short_ma > long_ma * 1.001:
+            return "bullish"
+        elif short_ma < long_ma * 0.999:
+            return "bearish"
+        else:
+            return "sideways"
 
     def process_order(self, side, limit_price, quantity, owner=None):
         from order_book import Order
         incoming_order = Order(side, limit_price, quantity, owner)
         
-        # Check if circuit breaker is active
         if self.circuit_active:
             if time.perf_counter() - self.circuit_trigger_time < config.CIRCUIT_BREAKER_DURATION:
                 self.log.info("Circuit breaker active. Order rejected.")
                 network.send_rejection(incoming_order)
                 return None
             else:
-                # Reset circuit breaker if the halt duration has expired
                 self.circuit_active = False
                 self.circuit_trigger_time = None
+
+
 
         network.send_order(incoming_order)
         remaining_qty = quantity
 
-        # Clamp the incoming order's limit to the DPR bounds.
         if limit_price < self.daily_lower_bound:
             limit_price = self.daily_lower_bound
         elif limit_price > self.daily_upper_bound:
             limit_price = self.daily_upper_bound
         incoming_order.price = enforce_tick(limit_price)
 
-        # Enforce TER (Trade Execution Range)
         ter_lower_bound = self.daily_open_price * (1 - config.TER_PERCENT / 100)
         ter_upper_bound = self.daily_open_price * (1 + config.TER_PERCENT / 100)
         if limit_price < ter_lower_bound or limit_price > ter_upper_bound:
@@ -103,24 +106,22 @@ class MatchingEngine:
 
         with self.lock:
             if side == 'B':
-                # Process BUY order: walk through ask levels (lowest ask first)
                 while remaining_qty > 0:
                     best_ask_price, total_ask_qty = self.order_book.get_best_ask()
                     if best_ask_price is None or best_ask_price > limit_price:
                         break
-
                     sell_queue = self.order_book.asks[best_ask_price]
                     while remaining_qty > 0 and sell_queue:
-                        best_sell = sell_queue[0]  # FIFO order at this price level
+                        best_sell = sell_queue[0]
                         trade_qty = min(remaining_qty, best_sell.quantity)
-                        # Set initial trade price from best ask price.
                         trade_price = best_ask_price
-                        # Apply mirror random slippage:
                         if incoming_order.owner is not None:
                             slippage_percent = config.CLIENT_SLIPPAGE_PERCENT
                         else:
                             slippage_percent = config.BOT_SLIPPAGE_PERCENT
-                        slippage = random.uniform(0, slippage_percent/100 * trade_price)
+                        
+                        delta = slippage_percent/100 * trade_price
+                        slippage = random.uniform(-delta/2, delta/2)
                         trade_price = enforce_tick(trade_price + slippage)
 
                         best_sell.quantity -= trade_qty
@@ -146,22 +147,20 @@ class MatchingEngine:
                                 self.log.info(
                                     "Circuit breaker triggered: Trade executed at circuit limit. Halting trading temporarily."
                                 )
-                                self.circuit_active = True
-                                self.circuit_trigger_time = time.perf_counter()
-
+                                # Instead of manually setting, use the circuit handler:
+                                trigger_circuit_breaker(self)
+                                self.expand_daily_band()
+                                
                         if best_sell.quantity == 0:
                             self.order_book.remove_order(best_sell.id)
                         else:
                             break
                     # End inner loop.
-                # End while loop.
-
                 if execution_count > 1 and aggregated_qty > 0:
                     self.trade_logger.info(
                         f"T: Aggregated Trade: Incoming BUY order id {incoming_order.id} executed "
                         f"{execution_count} times for total {aggregated_qty} units."
                     )
-
                 if remaining_qty > 0:
                     incoming_order.quantity = remaining_qty
                     self.order_book.add_existing_order(incoming_order)
@@ -170,23 +169,22 @@ class MatchingEngine:
                     return None
 
             else:
-                # Process SELL order: walk through bid levels (highest bid first)
                 while remaining_qty > 0:
                     best_bid_price, total_bid_qty = self.order_book.get_best_bid()
                     if best_bid_price is None or best_bid_price < limit_price:
                         break
-
                     buy_queue = self.order_book.bids[best_bid_price]
                     while remaining_qty > 0 and buy_queue:
                         best_buy = buy_queue[0]
                         trade_qty = min(remaining_qty, best_buy.quantity)
                         trade_price = best_bid_price
-                        # Apply mirror random slippage for sell orders:
                         if incoming_order.owner is not None:
                             slippage_percent = config.CLIENT_SLIPPAGE_PERCENT
                         else:
                             slippage_percent = config.BOT_SLIPPAGE_PERCENT
-                        slippage = random.uniform(0, slippage_percent/100 * trade_price)
+                        
+                        delta = slippage_percent/100 * trade_price
+                        slippage = random.uniform(-delta/2, delta/2)
                         trade_price = enforce_tick(trade_price - slippage)
 
                         best_buy.quantity -= trade_qty
@@ -214,20 +212,17 @@ class MatchingEngine:
                                 )
                                 self.circuit_active = True
                                 self.circuit_trigger_time = time.perf_counter()
-
+                                self.expand_daily_band()
                         if best_buy.quantity == 0:
                             self.order_book.remove_order(best_buy.id)
                         else:
                             break
                     # End inner loop.
-                # End while loop.
-
                 if execution_count > 1 and aggregated_qty > 0:
                     self.trade_logger.info(
                         f"T: Aggregated Trade: Incoming SELL order id {incoming_order.id} executed "
                         f"{execution_count} times for total {aggregated_qty} units."
                     )
-
                 if remaining_qty > 0:
                     incoming_order.quantity = remaining_qty
                     self.order_book.add_existing_order(incoming_order)

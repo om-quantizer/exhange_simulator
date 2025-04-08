@@ -8,7 +8,6 @@ class BotTrader:
     def __init__(self, bot_id, engine, profile: TraderProfile = None, mu=0.0, sigma=0.001):
         self.bot_id = bot_id
         self.engine = engine
-        # Each bot starts with a slightly randomized fair value.
         self.personal_price = config.INITIAL_PRICE + random.uniform(-1.0, 1.0)
         self.mu = mu
         self.sigma = sigma
@@ -19,44 +18,73 @@ class BotTrader:
         self.active_orders = {}
 
     def update_personal_price(self):
-        """
-        Update the bot's personal fair value using a GBM-like random walk plus mild feedback toward the last known LTP.
-        """
         Z = random.normalvariate(0, 1)
         effective_sigma = self.sigma * self.profile.price_sensitivity
         new_price = self.personal_price * math.exp(
             (self.mu - 0.5 * effective_sigma**2) * self.profile.tick_interval +
             effective_sigma * math.sqrt(self.profile.tick_interval) * Z
         )
-        alpha = 0.05  # Lower alpha gives smoother adjustment
+        alpha = 0.05
         new_price += alpha * (self.last_known_ltp - new_price)
         self.personal_price = enforce_tick(new_price)
 
-    def check_position_limit(self, proposed_side):
-        limit = config.POSITION_LIMIT
-        if proposed_side == "B" and self.position >= limit:
-            return "S"
-        elif proposed_side == "S" and self.position <= -limit:
-            return "B"
-        return proposed_side
-
     def run(self, duration=30):
+
         start_time = time.perf_counter()
+        last_profile_update = start_time  # record the last time the profile was updated
+        update_interval = 120  # seconds between dynamic profile updates
+
         while (time.perf_counter() - start_time) < duration:
+            # If circuit breaker active, cancel orders and pause
+            if self.engine.circuit_active:
+                for order_id in list(self.active_orders.keys()):
+                    self.engine.order_book.cancel_order(order_id)
+                    del self.active_orders[order_id]
+                self.log.info("Market halted due to shock. Pausing trading.")
+                time.sleep(5)
+                continue
+
             self.update_personal_price()
 
             if self.engine.last_traded_price is not None:
                 self.last_known_ltp = self.engine.last_traded_price
 
+
+            # Dynamic profile update during the day:
+            current_time = time.perf_counter()
+            if current_time - last_profile_update >= update_interval:
+                # Generate new dynamic weights by perturbing the base weights stored in the engine.
+                dynamic_weights = [max(0, w + random.uniform(-0.05, 0.05)) for w in self.engine.base_weights]
+                total = sum(dynamic_weights)
+                normalized_weights = [w / total for w in dynamic_weights]
+                old_profile = self.profile.name
+                # Reassign profile using the updated weights.
+                self.profile = random.choices(self.engine.profiles, weights=normalized_weights, k=1)[0]
+                last_profile_update = current_time
+                self.log.info(f"Dynamic profile update: Changed from {old_profile} to {self.profile.name}")
+
+
             best_bid_price, _ = self.engine.order_book.get_best_bid()
             best_ask_price, _ = self.engine.order_book.get_best_ask()
             current_market = self.engine.order_book.get_market_price()
-            diff = self.personal_price - current_market
 
-            slope_factor = 0.05
-            prob_buy = 0.5 - slope_factor * diff
-            prob_buy = max(0.0, min(1.0, prob_buy))
-            side = "B" if random.random() < prob_buy else "S"
+            # Determine trading side based on profile and market trend
+            if self.profile.name == "Momentum Trader":
+                trend = self.engine.update_trend_indicator(self.engine.last_traded_price)
+                side = "B" if trend == "bullish" else "S" if trend == "bearish" else ("B" if random.random() < 0.5 else "S")
+            
+            elif self.profile.name in ["Contrarian Buyer", "Contrarian Seller"]:
+                trend = self.engine.update_trend_indicator(self.engine.last_traded_price)
+                if trend == "bullish" and self.profile.name == "Contrarian Seller":
+                    side = "S"
+                elif trend == "bearish" and self.profile.name == "Contrarian Buyer":
+                    side = "B"
+                else:
+                    side = "B" if self.personal_price > self.last_known_ltp else "S"
+                    
+            else:
+                diff = self.personal_price - self.last_known_ltp
+                side = "S" if diff < 0 else "B"
 
             order_price = self.profile.compute_order_price(
                 bot=self,
@@ -65,11 +93,8 @@ class BotTrader:
                 best_ask_price=best_ask_price
             )
 
-            # Compute a base order quantity.
             base_qty = random.randint(config.MIN_ORDER_QTY, config.MAX_ORDER_QTY)
-            # Apply volume trend: higher volumes at start and end of day.
-            t_fraction = (time.perf_counter() - start_time) / duration  # normalized [0,1]
-            # U-shaped envelope: peak at t=0 and t=1, minimum at t=0.5.
+            t_fraction = (time.perf_counter() - start_time) / duration
             volume_weight = 1 + config.VOLUME_PEAK_FACTOR * (1 - 4 * (t_fraction - 0.5)**2)
             quantity = max(1, int(base_qty * self.profile.volume_multiplier * volume_weight))
 
