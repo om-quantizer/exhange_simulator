@@ -10,13 +10,13 @@ SYMBOL = "SBIN"
 INITIAL_PRICE = 700.0
 
 # Time step for each bot's personal price update
-TICK_INTERVAL = 0.5  # 1ms (example)
+TICK_INTERVAL = 1  # 1ms (example)
 
 # PRE_MARKET_DURATION = 2  # Duration in seconds for pre-market population phase
 
 # Multi-day simulation settings
 SEC_PER_DAY = 20           # 60 seconds = 1 "day" in the simulation
-NUM_DAYS = 2               # How many "days" to simulate total*
+NUM_DAYS = 1               # How many "days" to simulate total*
 
 # Daily band parameters (used directly in MatchingEngine)
 MAX_DAILY_MOVE_PERCENT = 10.0       # Starting daily band of ±10% around the open
@@ -35,7 +35,7 @@ MIN_ORDER_QTY = 1
 MAX_ORDER_QTY = 10  # keep small for demonstration
 
 # Participants
-NUM_BOTS = 20    
+NUM_BOTS = 80    
 NUM_CLIENTS = 2
 
 # TCP/UDP configuration
@@ -56,8 +56,8 @@ POSITION_LIMIT = 10
 # GBM_DRIFT_RANGE = (-0.0004, 0.0004)      # ±0.03% per time step
 # GBM_VOLATILITY_RANGE = (0.0001, 0.001)    # Smaller short-term volatility
 
-GBM_DRIFT_RANGE = (-0.001, 0.001)      # ±0.03% per time step
-GBM_VOLATILITY_RANGE = (0.0000001, 0.000001)    # Smaller short-term volatility
+GBM_DRIFT_RANGE = (-0.009, 0.009)      # ±0.03% per time step
+GBM_VOLATILITY_RANGE = (0.00001, 0.0005)    # Smaller short-term volatility
  
 
 SLIPPAGE_PERCENT = 0.05             # Default slippage percent (not used directly)
@@ -71,30 +71,30 @@ MIN_SHOCK_PERCENT = 10.0     # Minimum percentage change due to a shock event
 MAX_SHOCK_PERCENT = 20.0    # Maximum percentage change due to a shock event
 
 # New parameters for realism:
-VOLATILITY_THRESHOLD = 0.0001      # 1% threshold for volatility triggering aggressive behavior
+VOLATILITY_THRESHOLD = 0.00009      # 1% threshold for volatility triggering aggressive behavior
 DYNAMIC_BOT_SPAWN_ENABLED = True
 DYNAMIC_BOT_SPAWN_THRESHOLD = 0.002  # If volatility (relative to open) >2%, spawn extra bot
 DYNAMIC_BOT_SPAWN_COOLDOWN = 10     # Minimum seconds between spawns
 
-# *** NEW: Portfolio and Market Dynamics Parameters ***
-INITIAL_CAPITAL = 10000.0    # Baseline cash for each agent
-INITIAL_SHARES = 100         # Baseline share allocation for each agent
+# # *** NEW: Portfolio and Market Dynamics Parameters ***
+# INITIAL_CAPITAL = 10000.0    # Baseline cash for each agent
+# INITIAL_SHARES = 100         # Baseline share allocation for each agent
 
-# Dynamic portfolio multipliers (to create heterogeneity)
-CASH_MULTIPLIER_RANGE = (0.8, 1.2)
-SHARE_MULTIPLIER_RANGE = (0.8, 1.2)
+# # Dynamic portfolio multipliers (to create heterogeneity)
+# CASH_MULTIPLIER_RANGE = (0.8, 1.2)
+# SHARE_MULTIPLIER_RANGE = (0.8, 1.2)
 
-# Global market drift: a small common drift applied to all agents
-GLOBAL_DRIFT = 0.0001         
+# # Global market drift: a small common drift applied to all agents
+# GLOBAL_DRIFT = 0.0001         
 
-# Market impact: extra price adjustment when large orders execute relative to liquidity
-MARKET_IMPACT_COEFFICIENT = 0.001  
+# # Market impact: extra price adjustment when large orders execute relative to liquidity
+# MARKET_IMPACT_COEFFICIENT = 0.001  
 
-# Margin & leverage parameters
-LEVERAGE_ALLOWED = True
-# Maximum leverage factor: an agent can trade up to this multiple of its cash if using margin.
-MAX_LEVERAGE = 2.0
+# # Margin & leverage parameters
+# LEVERAGE_ALLOWED = True
+# # Maximum leverage factor: an agent can trade up to this multiple of its cash if using margin.
+# MAX_LEVERAGE = 2.0
 
-# Liquidity dynamics for order book
-MIN_LIQUIDITY_THRESHOLD = 5     # If bid or ask volume below this, consider liquidity low
-SPREAD_MULTIPLIER = 1.1         # Increase effective spread by 10% when liquidity is low
+# # Liquidity dynamics for order book
+# MIN_LIQUIDITY_THRESHOLD = 5     # If bid or ask volume below this, consider liquidity low
+# SPREAD_MULTIPLIER = 1.1         # Increase effective spread by 10% when liquidity is low

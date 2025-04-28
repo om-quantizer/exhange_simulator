@@ -1,6 +1,9 @@
 # order_book.py
-# In-memory order book with FIFO Price-Time priority matching, edit/cancel support, 
-# and snapshot logging of bids/asks for visualization.
+# In-memory limit order book with FIFO price-time priority, supporting:
+#  - Adding/canceling/editing orders
+#  - Retrieving best bid/ask and computing mid/imbalance price
+#  - Logging full book snapshots and best-price summaries for monitoring
+
 
 from collections import deque
 import network

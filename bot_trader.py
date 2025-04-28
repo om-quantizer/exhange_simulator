@@ -1,276 +1,190 @@
-# # # bot_trader.py
-# # import time, random, math, logging
-# # import config
-# # from utils import enforce_tick
-# # from trade_profile import PASSIVE, TraderProfile
+# bot_trader.py
+# Module: BotTrader
+# Description: Defines the BotTrader class which simulates autonomous trading agents (bots).
+# Each bot updates its own private valuation (personal_price) via a Geometric Brownian Motion model,
+# makes order decisions based on its TraderProfile, interacts with the MatchingEngine to place, edit,
+# and cancel orders, and enforces risk constraints like position limits and circuit breakers.
 
-# # class BotTrader:
-# #     def __init__(self, bot_id, engine, profile: TraderProfile = None, mu=0.0, sigma=0.001):
-# #         self.bot_id = bot_id
-# #         self.engine = engine
-# #         self.personal_price = config.INITIAL_PRICE + random.uniform(-1.0, 1.0)
-# #         self.mu = mu
-# #         self.sigma = sigma
-# #         self.profile = profile if profile is not None else PASSIVE
-# #         self.last_known_ltp = config.INITIAL_PRICE
-# #         self.position = 0  
-# #         self.log = logging.getLogger(f"bot_{bot_id}")
-# #         self.active_orders = {}
+import time                   # Provides time.perf_counter() and sleep functions for precise timing
+import random                 # Supplies random number generators for stochastic behavior
+import math                   # Provides exponential and square-root functions for GBM updates
+import logging                # Used for logging bot-specific actions, state changes, and errors
 
-# #     def update_personal_price(self):
-# #         Z = random.normalvariate(0, 1)
-# #         effective_sigma = self.sigma * self.profile.price_sensitivity
-# #         new_price = self.personal_price * math.exp(
-# #             (self.mu - 0.5 * effective_sigma**2) * self.profile.tick_interval +
-# #             effective_sigma * math.sqrt(self.profile.tick_interval) * Z
-# #         )
-# #         alpha = 0.05
-# #         new_price += alpha * (self.last_known_ltp - new_price)
-# #         self.personal_price = enforce_tick(new_price)
-
-# #     def run(self, duration=30):
-
-# #         start_time = time.perf_counter()
-# #         last_profile_update = start_time  # record the last time the profile was updated
-# #         update_interval = 120  # seconds between dynamic profile updates
-
-# #         while (time.perf_counter() - start_time) < duration:
-# #             # If circuit breaker active, cancel orders and pause
-# #             if self.engine.circuit_active:
-# #                 for order_id in list(self.active_orders.keys()):
-# #                     self.engine.order_book.cancel_order(order_id)
-# #                     del self.active_orders[order_id]
-# #                 self.log.info("Market halted due to shock. Pausing trading.")
-# #                 time.sleep(5)
-# #                 continue
-
-# #             self.update_personal_price()
-
-# #             if self.engine.last_traded_price is not None:
-# #                 self.last_known_ltp = self.engine.last_traded_price
-
-
-# #             # Dynamic profile update during the day:
-# #             current_time = time.perf_counter()
-# #             if current_time - last_profile_update >= update_interval:
-# #                 # Generate new dynamic weights by perturbing the base weights stored in the engine.
-# #                 dynamic_weights = [max(0, w + random.uniform(-0.05, 0.05)) for w in self.engine.base_weights]
-# #                 total = sum(dynamic_weights)
-# #                 normalized_weights = [w / total for w in dynamic_weights]
-# #                 old_profile = self.profile.name
-# #                 # Reassign profile using the updated weights.
-# #                 self.profile = random.choices(self.engine.profiles, weights=normalized_weights, k=1)[0]
-# #                 last_profile_update = current_time
-# #                 self.log.info(f"Dynamic profile update: Changed from {old_profile} to {self.profile.name}")
-
-
-# #             best_bid_price, _ = self.engine.order_book.get_best_bid()
-# #             best_ask_price, _ = self.engine.order_book.get_best_ask()
-# #             current_market = self.engine.order_book.get_market_price()
-
-# #             # Determine trading side based on profile and market trend
-# #             if self.profile.name == "Momentum Trader":
-# #                 trend = self.engine.update_trend_indicator(self.engine.last_traded_price)
-# #                 side = "B" if trend == "bullish" else "S" if trend == "bearish" else ("B" if random.random() < 0.5 else "S")
-            
-# #             elif self.profile.name in ["Contrarian Buyer", "Contrarian Seller"]:
-# #                 trend = self.engine.update_trend_indicator(self.engine.last_traded_price)
-# #                 if trend == "bullish" and self.profile.name == "Contrarian Seller":
-# #                     side = "S"
-# #                 elif trend == "bearish" and self.profile.name == "Contrarian Buyer":
-# #                     side = "B"
-# #                 else:
-# #                     side = "B" if self.personal_price > self.last_known_ltp else "S"
-                    
-# #             else:
-# #                 diff = self.personal_price - self.last_known_ltp
-# #                 side = "S" if diff < 0 else "B"
-
-# #             order_price = self.profile.compute_order_price(
-# #                 bot=self,
-# #                 side=side,
-# #                 best_bid_price=best_bid_price,
-# #                 best_ask_price=best_ask_price
-# #             )
-
-# #             base_qty = random.randint(config.MIN_ORDER_QTY, config.MAX_ORDER_QTY)
-# #             t_fraction = (time.perf_counter() - start_time) / duration
-# #             volume_weight = 1 + config.VOLUME_PEAK_FACTOR * (1 - 4 * (t_fraction - 0.5)**2)
-# #             quantity = max(1, int(base_qty * self.profile.volume_multiplier * volume_weight))
-
-# #             action = random.choices(
-# #                 ["new", "edit", "cancel"],
-# #                 weights=[self.profile.order_frequency, 0.5, self.profile.cancellation_rate],
-# #                 k=1
-# #             )[0]
-
-# #             if action == "new":
-# #                 order = self.engine.process_order(side, order_price, quantity, owner=None)
-# #                 if order:
-# #                     self.active_orders[order.id] = order
-# #                     self.log.info(f"N: Placed new order {order} (Fair={order_price:.2f}, Mkt={current_market:.2f}) using {self.profile.name}")
-# #                 else:
-# #                     self.log.info(f"N: Order fully executed on placement (Fair={order_price:.2f}, Mkt={current_market:.2f}) using {self.profile.name}")
-# #             elif action == "edit" and self.active_orders:
-# #                 order_id = random.choice(list(self.active_orders.keys()))
-# #                 order = self.active_orders[order_id]
-# #                 if order.active:
-# #                     new_offset = random.uniform(-0.01, 0.01)
-# #                     new_price = enforce_tick(order.price + new_offset)
-# #                     new_quantity = max(1, order.quantity + random.randint(-1, 1))
-# #                     success = self.engine.order_book.edit_order(order_id, new_price=new_price, new_quantity=new_quantity)
-# #                     if success:
-# #                         self.log.info(f"M: Edited order {order_id} to {new_price:.2f} @ {new_quantity}")
-# #                     else:
-# #                         self.log.info(f"M: Failed to edit order {order_id}")
-# #             elif action == "cancel" and self.active_orders:
-# #                 order_id = random.choice(list(self.active_orders.keys()))
-# #                 order = self.active_orders[order_id]
-# #                 if order.active:
-# #                     success = self.engine.order_book.cancel_order(order_id)
-# #                     if success:
-# #                         self.log.info(f"X: Cancelled order {order_id}")
-# #                         del self.active_orders[order_id]
-# #                     else:
-# #                         self.log.info(f"X: Failed to cancel order {order_id}")
-
-            
-# #             min_interval = config.TICK_INTERVAL * (1/self.profile.order_frequency)
-
-# #             sleep_time = random.uniform(min_interval, 1.5 * min_interval)
-# #             time.sleep(sleep_time)
-
-
-import time, random, math, logging
-import config
-from utils import enforce_tick
-from trade_profile import PASSIVE, TraderProfile
+import config                 # Imports global simulation parameters (e.g., price, durations, thresholds)
+from utils import enforce_tick # Utility to snap floating prices to discrete tick increments
+from trade_profile import PASSIVE, TraderProfile  # Default behavior profile and profile interface
 
 class BotTrader:
-    def __init__(self, bot_id, engine, profile: TraderProfile = None, mu=0.0, sigma=0.001):
-        self.bot_id = bot_id
-        self.engine = engine
+    """
+    BotTrader encapsulates the behavior of a single algorithmic trading bot.
+
+    Attributes:
+        bot_id (int): Unique identifier for this bot instance.
+        engine (MatchingEngine): Reference to the shared matching engine for order processing.
+        personal_price (float): Bot's internal valuation, evolves via GBM plus mean-reversion.
+        mu (float): Drift parameter controlling average directional movement of personal_price.
+        sigma (float): Volatility parameter controlling random fluctuations.
+        profile (TraderProfile): Behavior settings (e.g., order frequency, aggression).
+        last_known_ltp (float): Last Traded Price observed from market updates.
+        position (int): Net position (long positive, short negative) held by the bot.
+        log (Logger): Dedicated logger for this bot's actions.
+        active_orders (dict[int, Order]): Live orders tracked by their order IDs.
+        start_delay (float): Random delay before bot enters trading to avoid synchronization.
+        trading_duration (float): Time window length within which the bot actively trades.
+        start_time (float | None): Timestamp marking the beginning of trading activity.
+    """
+    def __init__(self, bot_id: int, engine, profile: TraderProfile = None, mu: float = 0.0, sigma: float = 0.001):
+        # Basic identifiers and shared references
+        self.bot_id = bot_id                              # Unique index for logging and tracking
+        self.engine = engine                              # MatchingEngine for order routing
+
+        # Initialize the private 'personal_price' around INITIAL_PRICE ±1 to create diversity
         self.personal_price = config.INITIAL_PRICE + random.uniform(-1.0, 1.0)
-        self.mu = mu
-        self.sigma = sigma
+        self.mu = mu                                      # Mean trend of price updates
+        self.sigma = sigma                                # Randomness magnitude in price updates
+
+        # Assign behavior profile or default to PASSIVE if none provided
         self.profile = profile if profile is not None else PASSIVE
-        self.last_known_ltp = config.INITIAL_PRICE
-        self.position = 0  
+
+        # Market state observations and current holdings
+        self.last_known_ltp = config.INITIAL_PRICE       # Initialize as starting price
+        self.position = 0                                 # No holdings at initialization
+
+        # Logger scoped to this bot for clear separation of logs
         self.log = logging.getLogger(f"bot_{bot_id}")
-        self.active_orders = {}
-        
-        # Variable entry/exit: random start delay and dynamic trading duration.
+        self.active_orders = {}                           # OrderID -> Order object for lifecycle management
+
+        # Randomize entry/exit times to simulate asynchronous participation
         self.start_delay = random.uniform(0, 0.3 * config.SEC_PER_DAY)
         self.trading_duration = random.uniform(0.5 * config.SEC_PER_DAY, config.SEC_PER_DAY)
-        self.start_time = None  # To be set when trading begins.
+        self.start_time = None                            # Will be set at run() invocation
 
-    def update_personal_price(self):
-        Z = random.normalvariate(0, 1)
+    def update_personal_price(self) -> None:
+        """
+        Updates personal_price using a stochastic Geometric Brownian Motion (GBM) model
+        combined with a small mean-reversion term drawing toward the last known market price.
+
+        Steps:
+            1. Sample Z ~ N(0,1) for random shock.
+            2. Compute GBM: S_new = S_prev * exp((mu - 0.5*sigma^2)*dt + sigma*sqrt(dt)*Z).
+            3. Apply a correction alpha*(last_known_ltp - S_new) for mean-reversion.
+            4. Snap the result to the nearest configured tick size.
+        """
+        Z = random.normalvariate(0, 1)  # Standard normal variable
         effective_sigma = self.sigma * self.profile.price_sensitivity
-        new_price = self.personal_price * math.exp(
-            (self.mu - 0.5 * effective_sigma**2) * self.profile.tick_interval +
-            effective_sigma * math.sqrt(self.profile.tick_interval) * Z
-        )
+        # GBM drift + diffusion component over one profile.tick_interval
+        drift_term = (self.mu - 0.5 * effective_sigma**2) * self.profile.tick_interval
+        diffusion_term = effective_sigma * math.sqrt(self.profile.tick_interval) * Z
+        new_price = self.personal_price * math.exp(drift_term + diffusion_term)
+
+        # Mean reversion: small pull toward observed market price
         alpha = 0.05
         new_price += alpha * (self.last_known_ltp - new_price)
-        self.personal_price = enforce_tick(new_price)
+        self.personal_price = enforce_tick(new_price)  # Enforce discrete price grid
 
-    def run(self, duration=30):
-        simulation_start = time.perf_counter()
-        # Wait until bot's start delay elapses.
+    def run(self, duration: float = config.SEC_PER_DAY) -> None:
+        """
+        Main execution loop for the bot. Runs for up to `duration` seconds,
+        performing: personal_price updates, dynamic profile switching, order decisions,
+        risk checks, and random delays.
+
+        Args:
+            duration (float): Time allocated for this bot to trade (in seconds).
+        """
+        simulation_start = time.perf_counter()           # High precision start timestamp
+        # Phase 1: Entry delay before trading begins
         while time.perf_counter() - simulation_start < self.start_delay:
-            time.sleep(1)
-        self.start_time = time.perf_counter()
-        trading_end_time = self.start_time + self.trading_duration
+            time.sleep(0.1)                              # Sleep in small increments to check again
+        self.start_time = time.perf_counter()             # Timestamp when trading window starts
+        trading_end = self.start_time + self.trading_duration
 
+        # Prepare for dynamic profile updates at regular intervals
         last_profile_update = time.perf_counter()
-        update_interval = 120  # seconds between dynamic profile updates
+        profile_update_interval = 120.0  # seconds
 
-        while time.perf_counter() < trading_end_time:
-            # Check circuit breaker.
+        # Phase 2: Active trading loop
+        while time.perf_counter() < trading_end:
+            # a) Market halt handling via circuit breaker
             if self.engine.circuit_active:
-                for order_id in list(self.active_orders.keys()):
-                    self.engine.order_book.cancel_order(order_id)
-                    del self.active_orders[order_id]
-                self.log.info("Market halted due to shock. Pausing trading.")
-                time.sleep(5)
+                # Cancel all active orders to comply with halt
+                for oid in list(self.active_orders):
+                    self.engine.order_book.cancel_order(oid)
+                    del self.active_orders[oid]
+                self.log.info("Circuit active: paused trading until reset.")
+                time.sleep(1)
                 continue
 
+            # b) Update internal valuation
             self.update_personal_price()
-            if self.engine.last_traded_price is not None:
-                self.last_known_ltp = self.engine.last_traded_price
+            self.last_known_ltp = self.engine.last_traded_price or self.last_known_ltp
 
-            # Dynamic profile update.
+            # c) Optionally switch trading profile based on updated engine weights
             current_time = time.perf_counter()
-            if current_time - last_profile_update >= update_interval:
-                dynamic_weights = [max(0, w + random.uniform(-0.05, 0.05)) for w in self.engine.base_weights]
-                total = sum(dynamic_weights)
-                normalized_weights = [w / total for w in dynamic_weights]
-                old_profile = self.profile.name
-                self.profile = random.choices(self.engine.profiles, weights=normalized_weights, k=1)[0]
+            if current_time - last_profile_update >= profile_update_interval:
+                # Create perturbed weights for selection
+                dyn_weights = [max(0, w + random.uniform(-0.05, 0.05)) for w in self.engine.base_weights]
+                total = sum(dyn_weights) or 1
+                normalized = [w/total for w in dyn_weights]
+                old = self.profile.name
+                # Randomly choose among engine.profiles with new weights
+                self.profile = random.choices(self.engine.profiles, weights=normalized, k=1)[0]
                 last_profile_update = current_time
-                self.log.info(f"Dynamic profile update: Changed from {old_profile} to {self.profile.name}")
+                self.log.info(f"Profile switch: {old} -> {self.profile.name}")
 
-            # Exit if trading window is over.
-            if time.perf_counter() >= trading_end_time:
-                self.log.info("Trading period over for this bot.")
-                break
+            # d) Market data queries
+            best_bid, bid_qty = self.engine.order_book.get_best_bid()
+            best_ask, ask_qty = self.engine.order_book.get_best_ask()
+            market_price = self.engine.order_book.get_market_price()
 
-            best_bid_price, bid_volume = self.engine.order_book.get_best_bid()
-            best_ask_price, ask_volume = self.engine.order_book.get_best_ask()
-            current_market = self.engine.order_book.get_market_price()
-
-            # Determine market trend and volatility.
+            # e) Trend and volatility signals
             trend = self.engine.update_trend_indicator(self.engine.last_traded_price)
-            volatility = abs(self.personal_price - self.last_known_ltp) / self.last_known_ltp
+            relative_vol = abs(self.personal_price - self.last_known_ltp) / max(self.last_known_ltp, 1)
 
-            # Decide order side – all profiles now use trend if volatility is high.
-            if volatility > config.VOLATILITY_THRESHOLD:
-                if trend in ["bullish", "bearish"]:
+            # f) Determine trade side: buy or sell
+            if relative_vol > config.VOLATILITY_THRESHOLD:
+                # In high volatility, follow clear trend if present
+                if trend in ("bullish", "bearish"):
                     side = "B" if trend == "bullish" else "S"
                 else:
+                    # Fallback: buy if internal > market
                     side = "B" if self.personal_price > self.last_known_ltp else "S"
             else:
+                # Use profile-specific logic for side selection
                 if self.profile.name == "Momentum Trader":
-                    side = "B" if trend == "bullish" else "S" if trend == "bearish" else ("B" if random.random() < 0.5 else "S")
-                elif self.profile.name in ["Contrarian Buyer", "Contrarian Seller"]:
-                    if trend == "bullish" and self.profile.name == "Contrarian Seller":
-                        side = "S"
-                    elif trend == "bearish" and self.profile.name == "Contrarian Buyer":
-                        side = "B"
-                    else:
-                        side = "B" if self.personal_price > self.last_known_ltp else "S"
+                    side = ("B" if trend == "bullish" else "S" if trend == "bearish"
+                            else random.choice(["B", "S"]))
+                elif self.profile.name.startswith("Contrarian"):
+                    # Contrarians trade against trend
+                    if trend == "bullish": side = ("S" if "Seller" in self.profile.name else "B")
+                    elif trend == "bearish": side = ("B" if "Buyer" in self.profile.name else "S")
+                    else: side = "B" if self.personal_price > self.last_known_ltp else "S"
                 else:
-                    diff = self.personal_price - self.last_known_ltp
-                    side = "S" if diff < 0 else "B"
+                    # Passive or others: compare valuations
+                    side = "B" if self.personal_price > self.last_known_ltp else "S"
 
-            order_price = self.profile.compute_order_price(
+            # g) Compute limit price via profile’s pricing function
+            limit_price = self.profile.compute_order_price(
                 bot=self,
                 side=side,
-                best_bid_price=best_bid_price,
-                best_ask_price=best_ask_price
+                best_bid_price=best_bid,
+                best_ask_price=best_ask
             )
 
+            # h) Determine order quantity based on time-of-day volume profile
             base_qty = random.randint(config.MIN_ORDER_QTY, config.MAX_ORDER_QTY)
-            # t_fraction: fraction of the bot's trading duration elapsed.
-            t_fraction = (time.perf_counter() - self.start_time) / self.trading_duration
-            # Adjust volume: more orders (or larger volume) at start and end.
-            volume_weight = 1 + config.VOLUME_PEAK_FACTOR * (4 * (t_fraction - 0.5)**2)
-            quantity = max(1, int(base_qty * self.profile.volume_multiplier * volume_weight))
+            elapsed = time.perf_counter() - self.start_time
+            frac = elapsed / self.trading_duration
+            # Volume peaks at start and end of day via quadratic curve
+            vol_factor = 1 + config.VOLUME_PEAK_FACTOR * (4 * (frac - 0.5)**2)
+            qty = max(1, int(base_qty * self.profile.volume_multiplier * vol_factor))
 
-            # Log market info.
-            self.log.info(
-                f"Market Info: LTP={self.engine.last_traded_price:.2f}, Best Bid Vol={bid_volume}, Best Ask Vol={ask_volume}"
-            )
+            # i) Enforce risk limits: no orders breaching position limits
+            if (side == "B" and self.position + qty > config.POSITION_LIMIT) or \
+               (side == "S" and self.position - qty < -config.POSITION_LIMIT):
+                self.log.debug(f"Risk limit: skip {side}{qty} at {limit_price}")
+                time.sleep(0.5); continue
 
-            # Enforce position limits.
-            if side == "B" and self.position >= config.POSITION_LIMIT:
-                self.log.info(f"Skipping BUY order: Position limit reached ({self.position} >= {config.POSITION_LIMIT}).")
-                continue
-            elif side == "S" and self.position <= -config.POSITION_LIMIT:
-                self.log.info(f"Skipping SELL order: Position limit reached ({self.position} <= -{config.POSITION_LIMIT}).")
-                continue
-
+            # j) Decide action type: new, edit, or cancel
             action = random.choices(
                 ["new", "edit", "cancel"],
                 weights=[self.profile.order_frequency, 0.5, self.profile.cancellation_rate],
@@ -278,52 +192,46 @@ class BotTrader:
             )[0]
 
             if action == "new":
-                order = self.engine.process_order(side, order_price, quantity, owner=None)
+                # Submit new limit order
+                order = self.engine.process_order(side, limit_price, qty, owner=None)
                 if order:
                     self.active_orders[order.id] = order
-                    self.log.info(
-                        f"N: Placed new order {order} (Fair={order_price:.2f}, Mkt={current_market:.2f}) using {self.profile.name}"
-                    )
+                    self.log.info(f"N: Placed new order {order.id} (Fair={limit_price:.2f}, Mkt={market_price:.2f}) using {self.profile.name}")
                 else:
-                    self.log.info(
-                        f"N: Order fully executed on placement (Fair={order_price:.2f}, Mkt={current_market:.2f}) using {self.profile.name}"
-                    )
+                    self.log.info(f"N: Order fully executed on placement (Fair={limit_price:.2f}, Mkt={market_price:.2f}) using {self.profile.name}")
+
             elif action == "edit" and self.active_orders:
-                order_id = random.choice(list(self.active_orders.keys()))
-                order = self.active_orders[order_id]
-                if order.active:
-                    new_offset = random.uniform(-0.01, 0.01)
-                    new_price = enforce_tick(order.price + new_offset)
-                    new_quantity = max(1, order.quantity + random.randint(-1, 1))
-                    success = self.engine.order_book.edit_order(order_id, new_price=new_price, new_quantity=new_quantity)
-                    if success:
-                        self.log.info(f"M: Edited order {order_id} to {new_price:.2f} @ {new_quantity}")
+                # Randomly pick one active order to modify
+                oid = random.choice(list(self.active_orders.keys()))
+                ord_obj = self.active_orders[oid]
+                if ord_obj.active:
+                    new_p = enforce_tick(ord_obj.price + random.uniform(-0.01, 0.01))
+                    new_q = max(1, ord_obj.quantity + random.randint(-1, 1))
+                    if self.engine.order_book.edit_order(oid, new_price=new_p, new_quantity=new_q):
+                        self.log.info(f"M: Edited order {oid}: ->{new_q}@{new_p}")
                     else:
-                        self.log.info(f"M: Failed to edit order {order_id}")
+                        self.log.warning(f"EDIT fail for {oid}")
+
             elif action == "cancel" and self.active_orders:
-                order_id = random.choice(list(self.active_orders.keys()))
-                order = self.active_orders[order_id]
-                if order.active:
-                    success = self.engine.order_book.cancel_order(order_id)
-                    if success:
-                        self.log.info(f"X: Cancelled order {order_id}")
-                        del self.active_orders[order_id]
-                    else:
-                        self.log.info(f"X: Failed to cancel order {order_id}")
+                # Cancel a random outstanding order
+                oid = random.choice(list(self.active_orders.keys()))
+                if self.engine.order_book.cancel_order(oid):
+                    self.log.info(f"X: Cancelled order {oid}")
+                    del self.active_orders[oid]
+                else:
+                    self.log.warning(f"CANCEL fail for {oid}")
 
-            # Calculate order delay by combining multiple factors.
-            effective_frequency = self.profile.order_frequency
+            # k) Compute next sleep interval adapting to profile speed and market activity
+            eff_freq = self.profile.order_frequency * (1.5 if relative_vol>config.VOLATILITY_THRESHOLD else 1)
+            base_int = config.TICK_INTERVAL / eff_freq
+            reaction_int = base_int * self.profile.reaction_speed
+            phase = 1 + config.VOLUME_PEAK_FACTOR * (4 * (frac - 0.5)**2)
+            sleep_dt = random.uniform(reaction_int, reaction_int * 1.5 * phase)
+            time.sleep(sleep_dt)
 
-            if volatility > config.VOLATILITY_THRESHOLD:
-                effective_frequency *= 1.5  # More aggressive trading when volatile.
+        # # End of run loop: log exit and final position
+        # self.log.info(f"Trading done: position={self.position}, active_orders={len(self.active_orders)}")
 
-            base_interval = config.TICK_INTERVAL * (1 / effective_frequency)
-            reaction_adjusted_interval = base_interval * self.profile.reaction_speed
-            day_phase_factor = 1 + config.VOLUME_PEAK_FACTOR * (4 * (t_fraction - 0.5)**2)
-            order_delay_min = reaction_adjusted_interval
-            order_delay_max = 1.5 * reaction_adjusted_interval * day_phase_factor
-            sleep_time = random.uniform(order_delay_min, order_delay_max)
-            time.sleep(sleep_time)
 
 
 # import time, random, math, logging
