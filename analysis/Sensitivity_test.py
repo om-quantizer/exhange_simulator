@@ -5,7 +5,7 @@ import numpy as np
 import config
 from order_book        import OrderBook
 from matching_engine   import MatchingEngine
-from main              import run_simulation_day
+from analysis.main              import run_simulation_day
 from trade_profile     import MOMENTUM_TRADER
 
 # ───── USER CONFIG ───────────────────────────────────────────────────────────

@@ -10,12 +10,12 @@ SYMBOL = "SBIN"
 INITIAL_PRICE = 700.0
 
 # Time step for each bot's personal price update
-TICK_INTERVAL = 1  # 1ms (example)
+TICK_INTERVAL = 600  # 1ms (example)
 
 # PRE_MARKET_DURATION = 2  # Duration in seconds for pre-market population phase
 
 # Multi-day simulation settings
-SEC_PER_DAY = 20           # 60 seconds = 1 "day" in the simulation
+SEC_PER_DAY = 3600           # 60 seconds = 1 "day" in the simulation
 NUM_DAYS = 1               # How many "days" to simulate total*
 
 # Daily band parameters (used directly in MatchingEngine)
@@ -38,24 +38,10 @@ MAX_ORDER_QTY = 10  # keep small for demonstration
 NUM_BOTS = 80    
 NUM_CLIENTS = 2
 
-# TCP/UDP configuration
-TCP_HOST = "127.0.0.1"
-TCP_PORT = 50
-UDP_GROUP = "224.1.1.1"
-UDP_PORT = 5007
-
-# TBT feed specifics
-STREAM_ID = 1
-TOKEN = 1001
-PRICE_MULTIPLIER = 100
-
 # For position limits
 POSITION_LIMIT = 10
 
 # # GBM parameters for bots (drift and volatility ranges)
-# GBM_DRIFT_RANGE = (-0.0004, 0.0004)      # ±0.03% per time step
-# GBM_VOLATILITY_RANGE = (0.0001, 0.001)    # Smaller short-term volatility
-
 GBM_DRIFT_RANGE = (-0.009, 0.009)      # ±0.03% per time step
 GBM_VOLATILITY_RANGE = (0.00001, 0.0005)    # Smaller short-term volatility
  
@@ -71,10 +57,21 @@ MIN_SHOCK_PERCENT = 10.0     # Minimum percentage change due to a shock event
 MAX_SHOCK_PERCENT = 20.0    # Maximum percentage change due to a shock event
 
 # New parameters for realism:
-VOLATILITY_THRESHOLD = 0.00009      # 1% threshold for volatility triggering aggressive behavior
+VOLATILITY_THRESHOLD = 0.00007      # 1% threshold for volatility triggering aggressive behavior
 DYNAMIC_BOT_SPAWN_ENABLED = True
 DYNAMIC_BOT_SPAWN_THRESHOLD = 0.002  # If volatility (relative to open) >2%, spawn extra bot
 DYNAMIC_BOT_SPAWN_COOLDOWN = 10     # Minimum seconds between spawns
+
+# TCP/UDP configuration
+TCP_HOST = "127.0.0.1"
+TCP_PORT = 50
+UDP_GROUP = "224.1.1.1"
+UDP_PORT = 5007
+
+# TBT feed specifics
+STREAM_ID = 1
+TOKEN = 1001
+PRICE_MULTIPLIER = 100
 
 # # *** NEW: Portfolio and Market Dynamics Parameters ***
 # INITIAL_CAPITAL = 10000.0    # Baseline cash for each agent

@@ -1,40 +1,40 @@
-# trader_profile.py
-# Defines trader profiles with additional parameters that influence order generation.
-#
-# Each profile now has the following parameters:
-#   - volume_multiplier: Scales the base order volume.
-#   - base_price_offset: A constant offset added to the bot's personal price.
-#   - aggression: Pushes the order price away from the personal price.
-#   - reaction_speed: Lower values mean the trader reacts (acts) more quickly.
-#   - cancellation_rate: Likelihood (0 to 1) that the trader cancels an order.
-#   - order_frequency: Multiplier to adjust how frequently new orders are placed.
-#   - price_sensitivity: How strongly the trader’s order price changes with market moves.
-#   - tick_interval: How frequently the trader updates its personal price (in seconds).
+# # # trader_profile.py
+# # # Defines trader profiles with additional parameters that influence order generation.
+# # #
+# # # Each profile now has the following parameters:
+# # #   - volume_multiplier: Scales the base order volume.
+# # #   - base_price_offset: A constant offset added to the bot's personal price.
+# # #   - aggression: Pushes the order price away from the personal price.
+# # #   - reaction_speed: Lower values mean the trader reacts (acts) more quickly.
+# # #   - cancellation_rate: Likelihood (0 to 1) that the trader cancels an order.
+# # #   - order_frequency: Multiplier to adjust how frequently new orders are placed.
+# # #   - price_sensitivity: How strongly the trader’s order price changes with market moves.
+# # #   - tick_interval: How frequently the trader updates its personal price (in seconds).
 
-# Expected Trends:
-#   • Aggressive Buyer: Places high-volume orders quickly at prices above its personal price.
-#     Tends to push the market up with fast, high bids.
+# # # Expected Trends:
+# # #   • Aggressive Buyer: Places high-volume orders quickly at prices above its personal price.
+# # #     Tends to push the market up with fast, high bids.
 
-#   • Aggressive Seller: Places high-volume orders quickly at prices below its personal price,
-#     likely to drive the market down.
+# # #   • Aggressive Seller: Places high-volume orders quickly at prices below its personal price,
+# # #     likely to drive the market down.
 
-#   • Passive: Trades conservatively with moderate volume and reaction; orders stay near the
-#     personal price, exerting little directional pressure.
+# # #   • Passive: Trades conservatively with moderate volume and reaction; orders stay near the
+# # #     personal price, exerting little directional pressure.
 
-#   • Market Maker: Places orders on both sides with moderate volume and high cancellation
-#     rate; aims to capture bid-ask spreads rather than directional moves.
+# # #   • Market Maker: Places orders on both sides with moderate volume and high cancellation
+# # #     rate; aims to capture bid-ask spreads rather than directional moves.
 
-#   • Contrarian Buyer: Looks for dips (with a slight negative base offset) and reacts moderately;
-#     may buy when others are selling, but with lower aggression.
+# # #   • Contrarian Buyer: Looks for dips (with a slight negative base offset) and reacts moderately;
+# # #     may buy when others are selling, but with lower aggression.
 
-#   • Contrarian Seller: Similarly, may sell when prices rise, with moderate behavior.
+# # #   • Contrarian Seller: Similarly, may sell when prices rise, with moderate behavior.
 
-#   • Momentum Trader: Reacts very quickly and aggressively, placing orders that follow market
-#     trends, which can amplify trends.
+# # #   • Momentum Trader: Reacts very quickly and aggressively, placing orders that follow market
+# # #     trends, which can amplify trends.
 
-#   • Risk Averse: Places smaller, less frequent orders and reacts slowly; tends to stabilize the market.
+# # #   • Risk Averse: Places smaller, less frequent orders and reacts slowly; tends to stabilize the market.
 
-#   • High Frequency: Acts extremely fast with low volume and minimal price shifts; their orders are short-lived and continuously updated.
+# # #   • High Frequency: Acts extremely fast with low volume and minimal price shifts; their orders are short-lived and continuously updated.
 
 
 # trade_profile.py
